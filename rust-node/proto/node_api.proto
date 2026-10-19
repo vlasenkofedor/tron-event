@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package api;
+
+service NodeApi {
+  // Bidirectional stream: client sends actions (ADD/REMOVE),
+  // server returns a stream of transactions.
+  rpc Subscribe(stream SubscriptionAction) returns (stream TransactionEvent);
+}
+
+message SubscriptionAction {
+  enum Action {
+    ADD = 0;
+    REMOVE = 1;
+  }
+  Action action = 1;
+  repeated string addresses = 2; // Batch of Base58 Tron addresses
+}
+
+// Event returned as JSON
+message TransactionEvent {
+  string transaction_json = 1; // Full transaction details encapsulated as a JSON string
+}

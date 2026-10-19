@@ -1,0 +1,17 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Env variables
+.env
+
+# IntelliJ/IDE
+/.idea/
+*.iml
+.vscode/
+
+# Application generated files
+*.log
+height.txt
+hash.txt
+scratch/
