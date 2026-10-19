@@ -5,6 +5,17 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info};
 
+/// Maximum concurrent outbound P2P connections.
+const MAX_CONCURRENT_PEERS: usize = 5;
+/// Delay between connection attempts to the same peer (ms).
+const CONNECTION_STAGGER_MS: u64 = 500;
+/// Delay between full seed-node rotation cycles (s).
+const ROTATION_DELAY_SECS: u64 = 30;
+
+/// Tron Event Node — high-performance P2P transaction monitor.
+///
+/// Starts gRPC API server, status worker, P2P listener, and outbound
+/// connection manager. Runs indefinitely until process is terminated.
 #[tokio::main]
 async fn main() {
     // 1. Initialize logging
@@ -53,8 +64,16 @@ async fn main() {
         }
     });
 
-    // 7. Start P2P Parallel Connection Manager (outbound)
-    let semaphore = Arc::new(Semaphore::new(5)); // Max 5 simultaneous connections to avoid IP bans
+    // 8. Graceful shutdown handler
+    let shutdown = tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => info!("Shutdown signal received, stopping..."),
+            Err(e) => error!("Failed to listen for ctrl_c: {}", e),
+        }
+    });
+
+    // 9. Start P2P Parallel Connection Manager (outbound)
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PEERS));
     let cfg_manager = cfg.clone();
     let state_manager = node_state.clone();
 
@@ -68,7 +87,7 @@ async fn main() {
             }
 
             for node in nodes {
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let permit = semaphore.clone().acquire_owned().await.expect("semaphore not closed");
                 let cfg_peer = cfg_manager.clone();
                 let state_peer = state_manager.clone();
                 let peer_addr = node.clone();
@@ -88,16 +107,15 @@ async fn main() {
                 });
                 
                 // Stagger to avoid rate-limiting/IP bans
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(CONNECTION_STAGGER_MS)).await;
             }
             
             info!("Finished cycling through all seed nodes. Waiting before next rotation...");
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(ROTATION_DELAY_SECS)).await;
         }
     });
 
-    // Keep main thread alive
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-    }
+    // Wait for shutdown signal
+    let _ = shutdown.await;
+    info!("Node stopped.");
 }

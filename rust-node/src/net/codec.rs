@@ -1,6 +1,67 @@
 use crate::net::P2pMessage;
 use bytes::{BufMut, BytesMut};
 
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_varint_single_byte() {
+        let data = [0x05];
+        let (val, pos) = TronCodec::parse_varint(&data, 0);
+        assert_eq!(val, 5);
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn test_parse_varint_multi_byte() {
+        // 300 = 0b10101100 0b00000010 -> varint: [0xAC, 0x02]
+        let data = [0xAC, 0x02];
+        let (val, pos) = TronCodec::parse_varint(&data, 0);
+        assert_eq!(val, 300);
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn test_write_varint_to_buf() {
+        let mut buf = BytesMut::new();
+        TronCodec::write_varint_to_buf(&mut buf, 300);
+        assert_eq!(buf.to_vec(), vec![0xAC, 0x02]);
+    }
+
+    #[test]
+    fn test_parse_endpoint_message_uncompressed() {
+        // EndpointMessage with compress_type=0, data=[0x01, 0x02, 0x03]
+        // Field 1 (compress_type): tag=0x08, value=0x00
+        // Field 2 (data): tag=0x12, len=3, data=[0x01, 0x02, 0x03]
+        let frame = [0x08, 0x00, 0x12, 0x03, 0x01, 0x02, 0x03];
+        let result = TronCodec::parse_endpoint_message(&frame);
+        assert!(result.is_ok());
+        let (compress, data) = result.unwrap();
+        assert_eq!(compress, 0);
+        assert_eq!(data, vec![0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn test_parse_endpoint_message_compressed() {
+        // EndpointMessage with compress_type=1, data=[0xAA, 0xBB]
+        let frame = [0x08, 0x01, 0x12, 0x02, 0xAA, 0xBB];
+        let result = TronCodec::parse_endpoint_message(&frame);
+        assert!(result.is_ok());
+        let (compress, data) = result.unwrap();
+        assert_eq!(compress, 1);
+        assert_eq!(data, vec![0xAA, 0xBB]);
+    }
+}
+
+/// TRON P2P wire protocol codec.
+///
+/// Handles Varint32 framing, EndpointMessage wrapping, and Snappy compression.
+/// Message type IDs >= 0xfb are LibP2P layer; below that are Tron protocol layer.
 pub struct TronCodec;
 
 impl TronCodec {
@@ -49,8 +110,7 @@ impl TronCodec {
         }
 
         // 3b. Tron messages: EndpointMessage wrapper
-        let (compress_type, inner_data) = Self::parse_endpoint_message(&frame)
-            .unwrap_or((0, frame.clone()));
+        let (compress_type, inner_data) = Self::parse_endpoint_message(&frame)?;
 
         // 4. Decompress if needed
         let decoded = if compress_type == 1 {
@@ -80,42 +140,29 @@ impl TronCodec {
         Ok(P2pMessage::decode(type_id, payload))
     }
 
-    /// Parse EndpointMessage protobuf manually.
-    /// Returns (compress_type, data_bytes).
-    fn parse_endpoint_message(buf: &[u8]) -> Option<(u64, Vec<u8>)> {
-        let mut pos = 0;
-        let mut compress_type: u64 = 0;
-        let mut data: Vec<u8> = Vec::new();
+    /// Parse a TRON EndpointMessage protobuf into (compress_type, data).
+    ///
+    /// EndpointMessage wire format:
+    ///   field 1 (varint):  compress_type  (0 = none, 1 = snappy)
+    ///   field 2 (bytes):   data           = [type_id][protobuf_payload]
+    fn parse_endpoint_message(buf: &[u8]) -> crate::error::Result<(u64, Vec<u8>)> {
+        use prost::Message as _;
 
-        while pos < buf.len() {
-            let (tag, new_pos) = Self::parse_varint(buf, pos);
-            pos = new_pos;
-            if pos > buf.len() { break; }
-
-            let field_num = tag >> 3;
-            let wire_type = tag & 0x07;
-
-            match wire_type {
-                0 => { // varint
-                    let (val, new_pos) = Self::parse_varint(buf, pos);
-                    pos = new_pos;
-                    if field_num == 1 { compress_type = val; }
-                }
-                2 => { // length-delimited
-                    let (len, new_pos) = Self::parse_varint(buf, pos);
-                    pos = new_pos;
-                    let end = pos + len as usize;
-                    if end > buf.len() { break; }
-                    if field_num == 2 { data = buf[pos..end].to_vec(); }
-                    pos = end;
-                }
-                1 => { pos += 8; } // 64-bit
-                5 => { pos += 4; } // 32-bit
-                _ => break,
-            }
+        #[derive(prost::Message)]
+        struct EndpointMessage {
+            #[prost(uint64, optional, tag = "1")]
+            compress_type: Option<u64>,
+            #[prost(bytes, optional, tag = "2")]
+            data: Option<Vec<u8>>,
         }
 
-        if data.is_empty() { None } else { Some((compress_type, data)) }
+        let msg = EndpointMessage::decode(buf)
+            .map_err(|e| crate::error::NodeError::Network(format!("EndpointMessage decode failed: {}", e)))?;
+
+        let compress_type = msg.compress_type.unwrap_or(0);
+        let data = msg.data.ok_or_else(|| crate::error::NodeError::Network("EndpointMessage has no data".to_string()))?;
+
+        Ok((compress_type, data))
     }
 
     /// Write a single P2P message to the wire.

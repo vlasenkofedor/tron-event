@@ -16,6 +16,10 @@ pub const DEFAULT_BLOCK_NUM: u64 = 81_728_607;
 pub const DEFAULT_BLOCK_HASH: &str = "0000000004df145fc80be5639ed7a12fd282bf1591be3998806a9290708c893d";
 
 impl Config {
+    /// Load configuration from environment variables (.env file or process env).
+    ///
+    /// Falls back to sensible defaults for all fields.
+    /// Critical settings: NETWORK, NODE_GRPC_URL, GRPC_LISTEN_ADDR, SEED_NODES.
     pub fn load() -> Self {
         dotenv().ok();
 

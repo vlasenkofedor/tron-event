@@ -4,13 +4,14 @@ use crate::p2p::utils::protocol_transaction_id;
 use crate::protocol;
 use crate::state::{NodeState, BlockUpdateResult};
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::net::tcp::OwnedWriteHalf;
 use tracing::{info, warn, debug};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 use lru::LruCache;
 use std::collections::VecDeque;
+
+/// Channel for sending P2P messages to the writer task.
+pub type WriterChannel = tokio::sync::mpsc::UnboundedSender<(P2pMessage, bool)>;
 
 pub struct PeerState {
     pub compression_enabled: bool,
@@ -22,10 +23,14 @@ pub struct PeerState {
     pub last_block_recv_time: u64,
 }
 
+/// Dispatch a P2P message to its specific handler.
+///
+/// Routes messages by type: Hello, Inventory, Block, Transaction, Disconnect, etc.
+/// Spawns async tasks for transaction processing with semaphore-bounded concurrency.
 pub async fn handle_message(
     msg: P2pMessage,
     peer_addr: &str,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     state: &Arc<NodeState>,
     peer_state: &mut PeerState,
 ) -> crate::error::Result<()> {
@@ -66,7 +71,7 @@ pub async fn handle_message(
         }
         P2pMessage::Libp2pDisconnect(_) => Err(crate::error::NodeError::Network("LibP2P disconnect".to_string())),
         P2pMessage::TronPing(data) => {
-            let _ = TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronPong(data), peer_state.compression_enabled, peer_addr).await;
+            let _ = writer.send((P2pMessage::TronPong(data), peer_state.compression_enabled));
             Ok(())
         }
         P2pMessage::Unknown(tid, data) => {
@@ -80,7 +85,7 @@ pub async fn handle_message(
 async fn handle_tron_hello(
     h: protocol::protocol::HelloMessage,
     peer_addr: &str,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     state: &Arc<NodeState>,
     peer_state: &mut PeerState,
 ) -> crate::error::Result<()> {
@@ -101,7 +106,7 @@ async fn handle_tron_hello(
         }).collect();
 
         let sync_req = protocol::protocol::BlockInventory { ids, r#type: 0 };
-        TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronSyncBlockChain(sync_req), false, peer_addr).await?;
+        writer.send((P2pMessage::TronSyncBlockChain(sync_req), false)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
         peer_state.sync_sent = true;
     }
     Ok(())
@@ -109,7 +114,7 @@ async fn handle_tron_hello(
 
 pub async fn fetch_next_batch(
     peer_state: &mut PeerState,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     peer_addr: &str,
 ) -> crate::error::Result<()> {
     let mut ids_to_fetch = Vec::new();
@@ -127,7 +132,7 @@ pub async fn fetch_next_batch(
         peer_state.pending_blocks += ids_to_fetch.len();
         let fetch = protocol::protocol::Inventory { r#type: 1, ids: ids_to_fetch.clone() }; 
         info!("[{}] FETCH: Requesting {} block(s), {} remaining in inventory queue", peer_addr, ids_to_fetch.len(), peer_state.pending_inventory.len());
-        TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronFetchInvData(fetch), peer_state.compression_enabled, peer_addr).await?;
+        writer.send((P2pMessage::TronFetchInvData(fetch), peer_state.compression_enabled)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
     }
     Ok(())
 }
@@ -135,7 +140,7 @@ pub async fn fetch_next_batch(
 async fn handle_chain_inventory(
     inv: protocol::protocol::ChainInventory,
     peer_addr: &str,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     peer_state: &mut PeerState,
     _state: &Arc<NodeState>,
 ) -> crate::error::Result<()> {
@@ -154,18 +159,18 @@ async fn handle_chain_inventory(
 async fn handle_sync_block_chain(
     _inv: protocol::protocol::BlockInventory,
     peer_addr: &str,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     peer_state: &PeerState,
 ) -> crate::error::Result<()> {
     let resp = protocol::protocol::ChainInventory { ids: vec![], remain_num: 0 };
-    TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronBlockChainInventory(resp), peer_state.compression_enabled, peer_addr).await?;
+    writer.send((P2pMessage::TronBlockChainInventory(resp), peer_state.compression_enabled)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
     Ok(())
 }
 
 async fn handle_inventory(
     inv: protocol::protocol::Inventory,
     peer_addr: &str,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     peer_state: &PeerState,
     state: &Arc<NodeState>,
 ) -> crate::error::Result<()> {
@@ -173,30 +178,30 @@ async fn handle_inventory(
     if inv.r#type == 0 {
         state.stats_inventory_tx.fetch_add(inv.ids.len() as u64, Ordering::Relaxed);
     }
-    TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronFetchInvData(inv), peer_state.compression_enabled, peer_addr).await?;
+    writer.send((P2pMessage::TronFetchInvData(inv), peer_state.compression_enabled)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
     Ok(())
 }
 
 async fn handle_trxs_inventory(
     inv: protocol::protocol::BlockInventory,
     peer_addr: &str,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     peer_state: &PeerState,
 ) -> crate::error::Result<()> {
     let ids = inv.ids.iter().map(|id| id.hash.clone()).collect();
     let fetch = protocol::protocol::Inventory { r#type: 0, ids };
-    TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronFetchInvData(fetch), peer_state.compression_enabled, peer_addr).await?;
+    writer.send((P2pMessage::TronFetchInvData(fetch), peer_state.compression_enabled)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
     Ok(())
 }
 
 pub async fn handle_block(
     block: protocol::protocol::Block,
     state: &Arc<NodeState>,
-    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    writer: &WriterChannel,
     peer_state: &mut PeerState,
     peer_addr: &str,
 ) -> crate::error::Result<()> {
-    peer_state.last_block_recv_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+    peer_state.last_block_recv_time = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     
     let block_num = block.block_header.as_ref().and_then(|h| h.raw_data.as_ref()).map(|r| r.number).unwrap_or(0);
     debug!("[{}] IN: Block #{}", peer_addr, block_num);
@@ -216,7 +221,7 @@ pub async fn handle_block(
         
         match update_result {
             BlockUpdateResult::GapDetected { missing_count: _, last_good_hash: _ } => {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
                 let last = state.last_sync_request_time.load(Ordering::SeqCst);
                 if now.saturating_sub(last) > 3000 {
                     state.last_sync_request_time.store(now, Ordering::SeqCst);
@@ -225,7 +230,7 @@ pub async fn handle_block(
                         protocol::protocol::block_inventory::BlockId { hash: hex::decode(hash_hex).unwrap_or_default(), number: *num as i64 }
                     }).collect();
                     let sync_req = protocol::protocol::BlockInventory { ids, r#type: 0 };
-                    let _ = TronCodec::write_message(&mut *writer.lock().await, &P2pMessage::TronSyncBlockChain(sync_req), peer_state.compression_enabled, peer_addr).await;
+                    let _ = writer.send((P2pMessage::TronSyncBlockChain(sync_req), peer_state.compression_enabled));
                 }
             }
             BlockUpdateResult::Duplicate => { return Ok(()); }

@@ -8,6 +8,12 @@ use futures::stream::{self, StreamExt};
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Start the background status worker.
+///
+/// Runs three concurrent tasks:
+/// 1. Heartbeat logging (chain head, peer count, tracking stats)
+/// 2. Gap filler (broadcasts sync requests when chain has gaps)
+/// 3. Confirmation loop (checks tracked txs for mined/solid status via gRPC)
 pub async fn start_status_worker(state: Arc<NodeState>, grpc_url: String) {
     info!("Starting Status Worker (gRPC: {})", grpc_url);
 
@@ -28,7 +34,7 @@ pub async fn start_status_worker(state: Arc<NodeState>, grpc_url: String) {
             let (seq_head, _) = state_h.last_block();
             let gossip_head = state_h.head_gossip_num.load(Ordering::SeqCst);
             let tracking = state_h.tracked_txs.len();
-            let gaps = state_h.pending_gaps.lock().unwrap().len();
+            let gaps = state_h.pending_gaps.lock().len();
             let peers = state_h.active_peers.len();
             
             if gaps > 0 {
@@ -45,7 +51,7 @@ pub async fn start_status_worker(state: Arc<NodeState>, grpc_url: String) {
         let mut interval = tokio::time::interval(Duration::from_millis(3000));
         loop {
             interval.tick().await;
-            let gaps_count = { state_g.pending_gaps.lock().unwrap().len() };
+            let gaps_count = { state_g.pending_gaps.lock().len() };
 
             if gaps_count > 0 {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;

@@ -12,13 +12,18 @@ pub mod api_proto {
 use api_proto::node_api_server::{NodeApi, NodeApiServer};
 use api_proto::{SubscriptionAction, TransactionEvent};
 
-/// gRPC Service implementation for the Node API.
+/// gRPC service for subscribing to transaction events.
+///
+/// Clients open a bidirectional stream and send `SubscriptionAction` messages
+/// to add/remove address filters. The server streams `TransactionEvent` JSON
+/// payloads for matching transactions in real-time.
 pub struct ApiService {
     /// Shared node state and subscriber registry.
     state: Arc<NodeState>,
 }
 
 impl ApiService {
+    /// Create a new API service backed by the given node state.
     pub fn new(state: Arc<NodeState>) -> Self {
         Self { state }
     }
@@ -91,7 +96,10 @@ impl NodeApi for ApiService {
     }
 }
 
-/// Starts the gRPC API server on the specified address.
+/// Start the gRPC server and block until shutdown.
+///
+/// Binds to `addr_str` (e.g., "0.0.0.0:50051") and serves the
+/// `NodeApi` service. Returns an error if binding fails.
 pub async fn start_api_server(state: Arc<NodeState>, addr_str: String) -> Result<(), Box<dyn std::error::Error>> {
     let addr = addr_str.parse()?;
     let service = ApiService::new(state);

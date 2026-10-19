@@ -4,12 +4,27 @@ use crate::state::{NodeState, TrackedTx, TransactionStatus};
 use prost::Message;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Main entry point for processing an individual transaction.
+/// Global file writer for transaction logs (avoids repeated OpenOptions).
+static TX_LOG_WRITER: OnceLock<Arc<Mutex<std::fs::File>>> = OnceLock::new();
+
+fn get_tx_log_writer() -> Arc<Mutex<std::fs::File>> {
+    TX_LOG_WRITER.get_or_init(|| {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("transactions.log")
+            .expect("Failed to open transactions.log");
+        Arc::new(Mutex::new(file))
+    }).clone()
+}
+
+/// Process a single transaction: parse contracts, broadcast events to subscribers.
 ///
-/// This function identifies the transaction type, parses its parameters, and broadcasts
-/// events to subscribers if matches are found. It also handles initial state assignment
-/// (Mempool vs Mined).
+/// Identifies transaction type (TRX transfer, TRC20, Freeze, Delegate, etc.),
+/// extracts relevant fields, builds a JSON event, and notifies matching subscribers.
+/// State label "confirmed" marks the tx as mined; anything else is mempool.
 pub fn process_transaction(tx: &protocol::protocol::Transaction, state_label: &str, node_state: &NodeState, block_num: Option<u64>) {
     let tx_id_bytes = protocol_transaction_id(tx);
     let tx_id = hex::encode(&tx_id_bytes);
@@ -265,7 +280,7 @@ fn build_event_json(
         if let Some(obj) = d.as_object_mut() {
             obj.insert("timestamp".to_string(), serde_json::json!(timestamp));
         }
-        result.as_object_mut().unwrap().insert("details".to_string(), d);
+        result.as_object_mut().expect("json value is always an object").insert("details".to_string(), d);
     }
 
     result
@@ -311,7 +326,8 @@ fn broadcast_event(addrs: &[&str], json: serde_json::Value, node_state: &NodeSta
 }
 
 fn log_to_file(line: &str) {
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("transactions.log") {
+    let writer = get_tx_log_writer();
+    if let Ok(mut file) = writer.lock() {
         let _ = writeln!(file, "{}", line);
-    }
+    };
 }
