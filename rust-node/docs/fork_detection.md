@@ -25,7 +25,14 @@ When a new block header arrives via P2P:
 
 ## Solidity (Finality)
 
-A transaction is considered `SOLID` (irreversible) in Tron when it is confirmed by 2/3 + 1 of the SRs. In practice, this happens when the block is **20 levels deep**.
+A transaction is considered `SOLID` (irreversible) in Tron when it is confirmed by 2/3 + 1 of the SRs. In practice, this happens when the block is **19 levels deep**.
+
+The node's confirmation depth is configurable:
+
+- `--solid-depth <N>` sets the number of blocks that must be built on top of the transaction's block.
+- The default is **20** — one block above the 19-block protocol threshold, as a safety margin.
+- The accepted range is `1`–`100000`; an invalid value prints usage and exits with status `2`.
+- The value affects only the moment the `SOLID` event is emitted. Fork detection, rollback and `MINED` reporting are independent of it.
 
 Because our node is now "Chain-Aware", the `SOLID` status is guaranteed to be on the **canonical main chain**.
 

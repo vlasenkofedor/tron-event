@@ -5,6 +5,9 @@ edition = "2021"
 
 [lib]
 path = "src/lib.rs"
+# Generated protobuf modules contain doc comments that are not valid Rust, so
+# running doc-tests would try to compile them as examples and fail.
+doctest = false
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }

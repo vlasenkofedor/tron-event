@@ -37,10 +37,10 @@ stateDiagram-v2
         end note
     }
     
-    Included --> Solidified : 19+ Blocks appended
+    Included --> Solidified : solid-depth blocks appended (default 20)
     
     state Solidified {
-        [*] --> Final : SRs have signed 19 blocks on top
+        [*] --> Final : Depth reached on the canonical chain
         note right of Final
             State: "solidified"
             Risk: ZERO (Cryptographically immutable)

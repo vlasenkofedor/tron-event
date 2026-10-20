@@ -3,3 +3,31 @@ members = [
     "rust-node",
 ]
 resolver = "2"
+
+# Release build tuned for maximum runtime performance and a small binary.
+#
+# - `opt-level = 3`     : full LLVM optimisation (vectorisation, inlining).
+# - `lto = "fat"`       : link-time optimisation across the whole dependency
+#                         graph (tonic, tokio, prost, ...), not just this crate.
+# - `codegen-units = 1`  : one LLVM partition, which enables cross-module
+#                         inlining at the cost of a longer build.
+# - `panic = "abort"`   : no landing pads, smaller and slightly faster code.
+#                         A panic terminates the process instead of unwinding;
+#                         this codebase has no `catch_unwind` and no code that
+#                         relies on unwinding for task isolation.
+# - `strip = "symbols"` : drop the symbol table from the shipped binary.
+# - `debug = false`     : no DWARF debug info in the release binary (default).
+#
+# For a machine-specific build that also uses the local CPU feature set
+# (AVX-512, AES-NI, ...), build with:
+#
+#     RUSTFLAGS="-C target-cpu=native" cargo build --release
+#
+# That binary is not portable to older CPUs, so it is not enabled by default.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false

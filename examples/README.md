@@ -154,6 +154,6 @@ Every transaction progresses through three states:
 
 1. **PENDING_MEMPOOL** — seen in the network mempool (before block inclusion)
 2. **MINED** — included in a mined block
-3. **SOLID** — confirmed 19+ blocks deep (irreversible)
+3. **SOLID** — final and irreversible: the block is at least `--solid-depth` deep (default `20`, i.e. Tron's 19-block finality plus a one-block margin)
 
-When a transaction reaches `SOLID`, a `STATUS_CHANGE` update is emitted.
+When a transaction reaches `SOLID`, a `STATUS_CHANGE` update is emitted. The depth is configured on the node with `rust-node --solid-depth <N>`; the examples themselves do not need to know it.

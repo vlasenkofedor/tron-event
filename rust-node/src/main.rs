@@ -22,10 +22,15 @@ async fn main() {
     logging::init_logging();
 
     // 2. Load configuration
-    let cfg = Arc::new(Config::load());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{}", config::solid_depth_usage());
+        return;
+    }
+    let cfg = Arc::new(Config::load_from(args));
     info!(
-        "Starting Rust Tron Node... Network: {}, P2P Version: {}",
-        cfg.network, cfg.p2p_version
+        "Starting Rust Tron Node... Network: {}, P2P Version: {}, Solid depth: {}",
+        cfg.network, cfg.p2p_version, cfg.solid_depth
     );
 
     // 3. Load / create persistent node state (last block + txid dedup)
@@ -42,8 +47,9 @@ async fn main() {
 
     // 5. Start Transaction Status Worker (confirmation / finality)
     let state_status = node_state.clone();
+    let solid_depth = cfg.solid_depth;
     tokio::spawn(async move {
-        p2p::status_worker::start_status_worker(state_status).await;
+        p2p::status_worker::start_status_worker(state_status, solid_depth).await;
     });
 
     // 6. Start P2P Inbound Listener (passive — let peers connect to us)

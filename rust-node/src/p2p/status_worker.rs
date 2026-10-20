@@ -6,21 +6,17 @@ use tracing::info;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Number of blocks that must be built on top of a transaction's block before
-/// it is considered final (SOLID).
-///
-/// Tron reaches irreversibility after 19 blocks; using 20 keeps a one-block
-/// safety margin, matching the previous behaviour of the gRPC-backed worker.
-const SOLID_DEPTH: u64 = 20;
-
 /// Start the background status worker.
 ///
 /// Runs three concurrent tasks:
 /// 1. Heartbeat logging (chain head, peer count, tracking stats)
 /// 2. Gap filler (broadcasts sync requests when chain has gaps)
 /// 3. Confirmation loop (promotes tracked txs to SOLID from the local chain)
-pub async fn start_status_worker(state: Arc<NodeState>) {
-    info!("Starting Status Worker (local chain only)");
+///
+/// `solid_depth` comes from `--solid-depth` (default
+/// [`crate::config::DEFAULT_SOLID_DEPTH`]).
+pub async fn start_status_worker(state: Arc<NodeState>, solid_depth: u64) {
+    info!("Starting Status Worker (local chain only, solid depth: {})", solid_depth);
 
     // Task 1: Heartbeat logging (Now with Peer Count)
     let state_h = state.clone();
@@ -108,7 +104,7 @@ pub async fn start_status_worker(state: Arc<NodeState>) {
     //
     // MINED is assigned when the block containing the transaction arrives over
     // P2P (see `tx_processor`). A transaction becomes SOLID once the local
-    // chain has built `SOLID_DEPTH` blocks on top of it, so no external RPC is
+    // chain has built `solid_depth` blocks on top of it, so no external RPC is
     // needed: the node derives the whole lifecycle from the chain it synced.
     //
     // Transactions seen only in the mempool never get a block number. They
@@ -119,17 +115,12 @@ pub async fn start_status_worker(state: Arc<NodeState>) {
     tokio::spawn(async move {
         loop {
             let (head, _) = state_c.last_block();
-            let solid_num = head.saturating_sub(SOLID_DEPTH);
+            let solid_num = solid_threshold(head, solid_depth);
 
             let ready: Vec<(String, TrackedTx)> = state_c
                 .tracked_txs
                 .iter()
-                .filter(|entry| {
-                    entry
-                        .value()
-                        .block_num
-                        .is_some_and(|block_num| block_num <= solid_num)
-                })
+                .filter(|entry| is_solid(entry.value().block_num, solid_num))
                 .map(|entry| (entry.key().clone(), entry.value().clone()))
                 .collect();
 
@@ -144,9 +135,64 @@ pub async fn start_status_worker(state: Arc<NodeState>) {
     });
 }
 
+/// Highest block number whose transactions are considered final at `head`.
+///
+/// Saturates at zero while the chain is shorter than `depth`, so the node can
+/// start syncing at genesis without underflowing.
+#[must_use]
+fn solid_threshold(head: u64, depth: u64) -> u64 {
+    head.saturating_sub(depth)
+}
+
+/// Whether a transaction is final at the given finality threshold.
+///
+/// Transactions without a block number (still in the mempool) are never final.
+#[must_use]
+fn is_solid(block_num: Option<u64>, solid_num: u64) -> bool {
+    block_num.is_some_and(|block_num| block_num <= solid_num)
+}
+
 fn broadcast_status_update(txid: &str, tracked: &crate::state::TrackedTx, state: &NodeState) {
     let event_json = serde_json::json!({ "txid": txid, "type": tracked.tx_type, "status": tracked.status.as_str(), "update_type": "STATUS_CHANGE", "details": tracked.details });
     let event = crate::api::api_proto::TransactionEvent { transaction_json: event_json.to_string() };
     let addrs_ref: Vec<&str> = tracked.notify_addresses.iter().map(|s| s.as_str()).collect();
     state.notify_subscribers(&addrs_ref, event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_solid, solid_threshold};
+
+    #[test]
+    fn solid_threshold_uses_configured_depth() {
+        assert_eq!(solid_threshold(1_000, 20), 980);
+        assert_eq!(solid_threshold(1_000, 19), 981);
+        assert_eq!(solid_threshold(1_000, 1), 999);
+    }
+
+    #[test]
+    fn solid_threshold_saturates_near_genesis() {
+        assert_eq!(solid_threshold(0, 20), 0);
+        assert_eq!(solid_threshold(5, 20), 0);
+        assert_eq!(solid_threshold(20, 20), 0);
+        assert_eq!(solid_threshold(21, 20), 1);
+    }
+
+    #[test]
+    fn is_solid_at_or_below_threshold() {
+        assert!(is_solid(Some(980), 980));
+        assert!(is_solid(Some(1), 980));
+        assert!(is_solid(Some(0), 0));
+    }
+
+    #[test]
+    fn is_solid_rejects_above_threshold() {
+        assert!(!is_solid(Some(981), 980));
+    }
+
+    #[test]
+    fn is_solid_rejects_mempool_transactions() {
+        assert!(!is_solid(None, 980));
+        assert!(!is_solid(None, u64::MAX));
+    }
 }

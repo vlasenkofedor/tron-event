@@ -58,15 +58,17 @@ Sent when a previously detected transaction reaches a new lifecycle stage.
 - `details`: Full transaction metadata (same as `NEW_TRANSACTION`).
 
 > [!IMPORTANT]
-> **Solid Confirmation**: In Tron, a transaction is considered `SOLID` (irreversible) after approximately 20 blocks on the canonical chain. This node uses **Fork Detection** to ensure this status is only emitted when the transaction is 20 blocks deep on the main branch.
+> **Solid Confirmation**: In Tron, a transaction is considered `SOLID` (irreversible) after 19 blocks on the canonical chain. This node uses **Fork Detection** to ensure the status is only emitted for a block on the main branch. The confirmation depth is configurable with the `--solid-depth <N>` command-line option and defaults to **20** (19 blocks of protocol finality plus a one-block safety margin). The configured value is printed in the startup log.
 
 ## Lifecycle States
 
 | Status | Description |
 | :--- | :--- |
 | `PENDING_MEMPOOL` | Transaction seen in the gossip network but not yet in a block. |
-| `MINED` | Transaction successfully included in a block. |
-| `SOLID` | Transaction reached finality (~20 blocks deep). This is the **terminal state**. |
+| `MINED` | Transaction successfully included in a block observed over P2P. |
+| `SOLID` | Transaction reached finality: its block is at least `--solid-depth` below the local head (default `20`). This is the **terminal state**. |
+
+Both `MINED` and `SOLID` are derived from the node's own P2P-synced chain, without any upstream RPC endpoint. `PENDING_MEMPOOL → MINED` happens when the containing block is applied; `MINED → SOLID` is emitted by the status worker once the local head is deep enough. A transaction that never appears in an observed block stays `PENDING_MEMPOOL` and is dropped by the hourly cleanup after one hour.
 
 ## Fork Detection & Finality
 

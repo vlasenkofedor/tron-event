@@ -22,7 +22,10 @@
 - [Project Layout](#project-layout)
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
+  - [Environment Variables](#environment-variables)
+  - [Command-line Options](#command-line-options)
 - [Building & Running](#building--running)
+  - [Optimized release profile](#optimized-release-profile)
 - [Capacity & Resource Usage](#capacity--resource-usage)
   - [Measured footprint by subscription count](#measured-footprint-by-subscription-count)
   - [Recommended sizing](#recommended-sizing)
@@ -111,7 +114,7 @@ flowchart TD
 Every detected transaction progresses through a verified lifecycle:
 - `PENDING_MEMPOOL`: Broadcasted by a peer, floating in the network mempool.
 - `MINED`: Sealed inside a mined block on the blockchain.
-- `SOLID`: Confirmed 19+ blocks deep by Super Representatives on the canonical chain. Irreversible and cryptographically final.
+- `SOLID`: Final and irreversible. The block containing the transaction is at least `--solid-depth` blocks below the local head (default `20`, one block above Tron's 19-block irreversibility threshold).
 
 ### 3. Fork Detection & Re-org Protection
 In DPoS networks, short forks (1–2 blocks) occasionally occur when two Super Representatives produce blocks concurrently. 
@@ -212,6 +215,40 @@ cp rust-node/.env.example rust-node/.env
 | `GRPC_LISTEN_ADDR` | `0.0.0.0:50051` | Bind address for the internal gRPC subscription API |
 | `SEED_NODES` | Built-in seed list | Optional comma-separated custom peer IP:port list |
 
+### Command-line Options
+
+The only command-line option is the finality depth. Everything else is configured through environment variables.
+
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `--solid-depth <N>` | `20` | Number of blocks that must be built on top of a transaction before it is reported as `SOLID` |
+| `-h`, `--help` | — | Print usage and exit |
+
+Accepted forms:
+
+```bash
+rust-node --solid-depth 30     # separate value
+rust-node --solid-depth=30     # inline value
+```
+
+Rules and behaviour:
+
+- **Range**: `1`–`100000`. `0` is rejected because a transaction would become final in its own block. Values above `100000` are rejected as almost certainly a typo.
+- **Invalid input** prints the reason plus the usage line and exits with status `2`, so a process supervisor will not silently run with an unintended threshold.
+- **Repeated option**: the last occurrence wins.
+- **Unrelated arguments** are ignored, which lets you append the flag through a supervisor or a shell wrapper without rewriting the command line.
+- **Default `20`**: Tron reaches irreversibility after 19 blocks; the extra block is a safety margin. The value only controls when the `STATUS_CHANGE` event with `"status": "SOLID"` is emitted. `PENDING_MEMPOOL` and `MINED` events are unaffected, and the depth is logged at startup.
+
+Example with a custom depth:
+
+```bash
+cargo run --release -p rust-node -- --solid-depth 30
+# or, using the built binary:
+./target/release/rust-node --solid-depth 30
+```
+
+Lower values reduce confirmation latency at the cost of a larger re-org window; higher values make finality more conservative. The node never emits `SOLID` for a block that is not on its canonical chain, regardless of the configured depth.
+
 ---
 
 ## Building & Running
@@ -221,6 +258,36 @@ From the repository root:
 ```bash
 cargo build --release
 ```
+
+#### Optimized release profile
+
+The workspace ships a release profile tuned for maximum runtime speed and a small binary. The keys live in the root `Cargo.toml`; the standalone `examples/rust` workspace uses the same values.
+
+| Profile key | Value | Effect |
+| :--- | :--- | :--- |
+| `opt-level` | `3` | Full LLVM optimisation (inlining, vectorisation, loop unrolling) |
+| `lto` | `"fat"` | Link-time optimisation across the entire dependency graph, including Tokio, Tonic and Prost |
+| `codegen-units` | `1` | A single LLVM partition; enables cross-module inlining |
+| `panic` | `"abort"` | No landing pads; smaller and slightly faster code |
+| `strip` | `"symbols"` | Removes the symbol table from the shipped binary |
+| `debug` | `false` | No DWARF debug information |
+
+Measured on the reference machine (AMD Ryzen 9 9950X, 125 GiB RAM, Linux 7.0):
+
+| Metric | Default release | Optimized profile |
+| :--- | :--- | :--- |
+| Node binary size | 6.0 MB | **2.9 MB** (−52 %) |
+| Clean release build | ~20 s | ~28 s |
+
+`panic = "abort"` means an unexpected panic terminates the process instead of unwinding a single task. The codebase does not use `catch_unwind` and does not rely on task-local unwinding, so this is safe here; run the node under a process supervisor (systemd, Docker restart policy, Kubernetes) so it is restarted automatically if it ever exits.
+
+For a machine-specific build that also enables the local CPU feature set (AVX-512, AES-NI, BMI2, …):
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+Such a binary is **not portable** to older CPUs, so `target-cpu=native` is intentionally not enabled by default. Build once per deployment host.
 
 ### 2. Run the Node
 ```bash

@@ -7,6 +7,18 @@ description = "Rust gRPC subscriber example for tron-event node"
 # Keep this example independent of the root workspace
 [workspace]
 
+# Same optimisation profile as the node itself: the subscriber is a long-running
+# gRPC client and the load-test binary is a throughput benchmark, so both
+# benefit from full LTO and a single codegen unit. See the root `Cargo.toml`
+# for a detailed explanation of every key.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tonic = "0.12"
