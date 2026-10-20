@@ -26,6 +26,11 @@
   - [Command-line Options](#command-line-options)
 - [Building & Running](#building--running)
   - [Optimized release profile](#optimized-release-profile)
+- [Docker](#docker)
+  - [Build the image](#build-the-image)
+  - [Run the container](#run-the-container)
+  - [Docker Compose](#docker-compose)
+  - [Measured image](#measured-image)
 - [Capacity & Resource Usage](#capacity--resource-usage)
   - [Measured footprint by subscription count](#measured-footprint-by-subscription-count)
   - [Recommended sizing](#recommended-sizing)
@@ -136,6 +141,10 @@ Does not require transaction history indexing, multi-gigabyte LevelDB archives, 
 ```text
 tron-event/
 ├── Cargo.toml                    # Root workspace configuration
+├── Cargo.lock                    # Locked dependency versions
+├── Dockerfile                    # Multi-stage static build → 4.4 MB scratch image
+├── docker-compose.yml            # One-command deployment with a persistent volume
+├── .dockerignore                 # Keeps the image build context minimal
 ├── .gitignore                    # Comprehensive exclusion rules (no secrets/debugs)
 ├── main_net_config.conf          # Reference Tron Mainnet configuration
 ├── test_net_config.conf          # Reference Tron Testnet configuration
@@ -192,6 +201,7 @@ tron-event/
 - **Rust**: Version 1.75+ (with `cargo`)
 - **Protocol Buffers**: `protoc` (managed automatically via `protoc-bin-vendored` during `cargo build`)
 - **Node.js** (optional, for running JS consumer examples): Version 18+
+- **Docker** (optional, for the container image): Engine 24+ with the `compose` plugin
 
 ---
 
@@ -299,6 +309,135 @@ The node will initialize:
 2. Connect to active Tron P2P seed nodes and perform handshakes.
 3. Launch the `StatusWorker` to verify block confirmations and monitor chain finality.
 4. Stream incoming mempool and mined transactions in real time.
+
+---
+
+## Docker
+
+The repository ships a multi-stage `Dockerfile` that builds a **4.4 MB** image. The builder compiles the node for a musl target, producing a fully static binary (no libc, no dynamic loader), and the runtime stage is `FROM scratch`, so the final image contains just the stripped binary and an empty `/data` directory.
+
+### Build the image
+
+```bash
+docker build -t tron-event:latest .
+```
+
+What the build does:
+
+1. Starts from `rust:1.99-slim-bookworm` and installs `musl-tools`. The target triple is chosen from the build platform (`x86_64-unknown-linux-musl` for amd64, `aarch64-unknown-linux-musl` for arm64) and added with `rustup target add`.
+2. Copies only `Cargo.toml`, `Cargo.lock` and `rust-node/` (see `.dockerignore`; examples, scripts and runtime state are excluded).
+3. Runs `cargo build --release --locked --target <triple> -p rust-node`. The optimized release profile (fat LTO, one codegen unit, stripped symbols) comes from the workspace `Cargo.toml`.
+4. Copies the binary into an empty `scratch` filesystem.
+
+For multi-architecture images (ARM servers, Apple Silicon builders):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t your-registry/tron-event:latest --push .
+```
+
+BuildKit sets `TARGETARCH` for each platform automatically, so the same Dockerfile produces both images. The amd64 image is the one measured below; arm64 uses the same code path with the aarch64 musl toolchain.
+
+### Run the container
+
+```bash
+docker run -d --name tron-event \
+  --restart unless-stopped \
+  -p 50051:50051 \
+  -p 18888:18888 \
+  -e NETWORK=mainnet \
+  -e EXTERNAL_IP=<your-public-ip> \
+  -v tron-data:/data \
+  tron-event:latest --solid-depth 20
+```
+
+| Setting | Purpose |
+| :--- | :--- |
+| `-e EXTERNAL_IP=<ip>` | Public address announced to peers. Must be reachable from the internet for inbound P2P connections. |
+| `-p 18888:18888` | Tron P2P listener (port is hard-coded in the node). Outbound-only syncing works without it, but publishing it gives you inbound peers. |
+| `-p 50051:50051` | gRPC subscription API used by the clients in `examples/`. |
+| `-v tron-data:/data` | Persists `height.txt` (fork-detection context) and `transactions.log` across container restarts. |
+| `--solid-depth 20` | Everything after the image name is passed to the binary; see [Command-line Options](#command-line-options). |
+
+Verify startup and chain position:
+
+```bash
+docker logs -f tron-event
+# ... Starting Status Worker (local chain only, solid depth: 20)
+# ... P2P listener started on 0.0.0.0:18888
+# ... [HEARTBEAT] Sync Status: OK, Head: 87272651, Peers: 5
+```
+
+The `scratch` image intentionally has no shell, package manager or debugging tools, which is what keeps it small. Use Docker tooling instead:
+
+```bash
+docker logs tron-event           # structured logs
+docker stats tron-event          # memory / CPU
+docker cp tron-event:/data/height.txt .   # inspect persisted state
+# docker exec tron-event sh      # fails: there is no /bin/sh
+```
+
+Subscribe from the host with the bundled clients (they default to `127.0.0.1:50051`, which the `-p 50051:50051` mapping exposes):
+
+```bash
+cd examples/rust
+cargo run --release -- TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
+```
+
+### Docker Compose
+
+The repository includes [`docker-compose.yml`](docker-compose.yml) with the same settings:
+
+```yaml
+services:
+  tron-event:
+    build: .
+    image: tron-event:latest
+    container_name: tron-event
+    restart: unless-stopped
+    command: ["--solid-depth", "20"]
+    ports:
+      - "50051:50051"
+      - "18888:18888"
+    environment:
+      NETWORK: ${NETWORK:-mainnet}
+      # Set EXTERNAL_IP to your public IP for inbound peers; 127.0.0.1 means outbound-only.
+      EXTERNAL_IP: ${EXTERNAL_IP:-127.0.0.1}
+    volumes:
+      - tron-data:/data
+
+volumes:
+  tron-data:
+```
+
+```bash
+EXTERNAL_IP=203.0.113.10 docker compose up -d --build
+docker compose logs -f
+```
+
+If `EXTERNAL_IP` is omitted, the node listens and syncs outbound-only with `127.0.0.1` as its announced address.
+
+### Measured image
+
+| Metric | Value |
+| :--- | :--- |
+| Final image size | **4.43 MB** (`docker images`: `tron-event:latest`) |
+| Binary inside the image | 3.03 MB, `static-pie`, stripped |
+| Clean image build | ~40 s on the reference machine |
+| Startup → first heartbeat | under 1 s |
+| Idle container RSS | ~11 MB (`docker stats`) |
+| gRPC check | 200 addresses subscribed and removed successfully |
+
+Tested with Docker 29.9.1 on Linux x86-64: the container started, connected to 5 peers, re-anchored to the Mainnet head, wrote `height.txt` into the mounted volume, and answered the gRPC subscription API on the published port.
+
+### Why the image is this small
+
+- **Static musl target** — no glibc, no dynamic loader and no OpenSSL to package.
+- **`FROM scratch`** — no base OS, no shell, no package metadata.
+- **`strip = "symbols"` + fat LTO** — a 3.0 MB binary instead of 6.0 MB.
+- **`.dockerignore`** — the build context excludes `target/`, `.git/`, examples, scripts and runtime logs, so builds stay fast and no state leaks into the image.
+
+If you need a shell for debugging, build a temporary variant with `FROM alpine:3.20` and the same binary; do not ship it to production. The node itself needs no CA certificates because it speaks plaintext P2P and plaintext gRPC only.
 
 ---
 

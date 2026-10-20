@@ -1,0 +1,19 @@
+services:
+  tron-event:
+    build: .
+    image: tron-event:latest
+    container_name: tron-event
+    restart: unless-stopped
+    command: ["--solid-depth", "20"]
+    ports:
+      - "50051:50051"
+      - "18888:18888"
+    environment:
+      NETWORK: ${NETWORK:-mainnet}
+      # Set EXTERNAL_IP to your public IP for inbound peers; 127.0.0.1 means outbound-only.
+      EXTERNAL_IP: ${EXTERNAL_IP:-127.0.0.1}
+    volumes:
+      - tron-data:/data
+
+volumes:
+  tron-data:
