@@ -48,6 +48,23 @@ mod tests {
         assert_eq!(block.hash, "abcd");
         assert_eq!(block.parent_hash, "1234");
     }
+
+    #[test]
+    fn notify_subscribers_delivers_once_for_repeated_addresses() {
+        let state = NodeState::for_test();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let addr = format!("41{}", "a".repeat(40));
+        state.add_subscriber(1, addr.clone(), tx);
+
+        let event = crate::api::api_proto::TransactionEvent {
+            transaction_json: "{}".to_string(),
+        };
+        let notified = state.notify_subscribers(&[&addr, &addr, &addr], event);
+
+        assert!(notified, "subscriber should match");
+        assert!(rx.try_recv().is_ok(), "event should be delivered");
+        assert!(rx.try_recv().is_err(), "event must not be duplicated");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -241,6 +258,14 @@ impl NodeState {
             );
         }
 
+        Self::from_chain(chain)
+    }
+
+    /// Build a state from an already loaded chain history.
+    ///
+    /// Shared by [`NodeState::load`] and the test constructor, so unit tests
+    /// never read or write `height.txt` in the runtime working directory.
+    fn from_chain(chain: VecDeque<BlockInfo>) -> Self {
         let tip_num = chain.back().map(|b| b.number).unwrap_or(0);
         let now_ms = Self::now_ms();
 
@@ -274,6 +299,16 @@ impl NodeState {
             stats_notified: AtomicU64::new(0),
             stats_notify_calls: AtomicU64::new(0),
         }
+    }
+
+    /// Minimal in-memory state for unit tests: genesis only, no disk access.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::from_chain(VecDeque::from([BlockInfo {
+            number: 0,
+            hash: GENESIS_HASH.to_string(),
+            parent_hash: String::new(),
+        }]))
     }
 
     /// Re-anchor the chain to a peer's advertised head block.
@@ -696,7 +731,14 @@ impl NodeState {
     pub fn notify_subscribers(&self, addrs: &[&str], event: crate::api::api_proto::TransactionEvent) -> bool {
         let mut found = false;
         self.stats_notify_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        for addr in addrs {
+        for (idx, addr) in addrs.iter().enumerate() {
+            // Events carry each address in hex and Base58 form. A self-transfer
+            // (from == to) or a self-delegation (owner == receiver) therefore
+            // repeats the same string in the list; deliver at most one event
+            // per address.
+            if addrs[..idx].contains(addr) {
+                continue;
+            }
             if let Some(mut subs) = self.subscribers.get_mut(*addr) {
                 if !subs.is_empty() {
                     found = true;

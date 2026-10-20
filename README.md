@@ -548,6 +548,28 @@ When the transaction reaches finality on the main branch, a `STATUS_CHANGE` upda
 }
 ```
 
+The same envelope is used for resource and staking operations (`DELEGATE_RESOURCE`, `UNDELEGATE_RESOURCE`, `FREEZE_V1`, `UNFREEZE_V1`, `FREEZE_V2`, `UNFREEZE_V2`, `WITHDRAW_EXPIRE_UNFREEZE`, `CANCEL_ALL_UNFREEZE_V2`). Delegation events go to both the owner and the receiver and include the full Stake 2.0 lock information:
+
+```json
+{
+  "txid": "5f0c...",
+  "type": "DELEGATE_RESOURCE",
+  "status": "PENDING_MEMPOOL",
+  "update_type": "NEW_TRANSACTION",
+  "details": {
+    "owner": "TQrY8tryqsYVCYS3MFbtffiPp2ccyn4STm",
+    "receiver": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    "resource": "ENERGY",
+    "amount": 15000000,
+    "lock": true,
+    "lock_period": 7,
+    "timestamp": 1713000000000
+  }
+}
+```
+
+See [Contract Events](rust-node/docs/api.md#contract-events) for the complete type table, resource codes and amount units.
+
 ---
 
 ## Client Integration Examples

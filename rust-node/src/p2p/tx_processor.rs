@@ -215,17 +215,33 @@ fn resource_code_to_str(code: i32) -> &'static str {
 
 fn handle_delegate(_tx: &protocol::protocol::Transaction, tx_id: &str, parameter: &prost_types::Any, timestamp: i64, status: TransactionStatus, node_state: &NodeState, block_num: Option<u64>) {
     if let Ok(c) = protocol::protocol::DelegateResourceContract::decode(&parameter.value as &[u8]) {
-        let from_b58 = bytes_to_base58(&c.owner_address);
-        let to_b58 = bytes_to_base58(&c.receiver_address);
-        let resource_str = resource_code_to_str(c.resource);
-        let details = serde_json::json!({ "owner": from_b58, "receiver": to_b58, "resource": resource_str, "amount": c.balance });
+        let details = delegate_details(&c);
         let event = build_event_json(tx_id, "DELEGATE_RESOURCE", timestamp, status, Some(details));
         let enriched_details = event["details"].clone();
         broadcast_event(
-            &[hex::encode(&c.owner_address).as_str(), hex::encode(&c.receiver_address).as_str(), from_b58.as_str(), to_b58.as_str()],
+            &[hex::encode(&c.owner_address).as_str(), hex::encode(&c.receiver_address).as_str(),
+              bytes_to_base58(&c.owner_address).as_str(), bytes_to_base58(&c.receiver_address).as_str()],
             event, node_state, tx_id, status, block_num, "DELEGATE_RESOURCE", enriched_details
         );
     }
+}
+
+/// Build the `details` object for a resource delegation.
+///
+/// `lock` and `lock_period` describe Stake 2.0 locked delegations: the
+/// delegated resources cannot be undelegated until the lock period (in days)
+/// expires. Both fields are always present, so consumers can distinguish a
+/// normal delegation (`lock: false`) from a locked one without guessing.
+fn delegate_details(c: &protocol::protocol::DelegateResourceContract) -> serde_json::Value {
+    let resource_str = resource_code_to_str(c.resource);
+    serde_json::json!({
+        "owner": bytes_to_base58(&c.owner_address),
+        "receiver": bytes_to_base58(&c.receiver_address),
+        "resource": resource_str,
+        "amount": c.balance,
+        "lock": c.lock,
+        "lock_period": c.lock_period
+    })
 }
 
 fn handle_undelegate(_tx: &protocol::protocol::Transaction, tx_id: &str, parameter: &prost_types::Any, timestamp: i64, status: TransactionStatus, node_state: &NodeState, block_num: Option<u64>) {
@@ -274,6 +290,7 @@ fn build_event_json(
         "txid": tx_id,
         "type": tx_type,
         "status": status.as_str(),
+        "update_type": "NEW_TRANSACTION",
     });
 
     if let Some(mut d) = details {
@@ -330,4 +347,77 @@ fn log_to_file(line: &str) {
     if let Ok(mut file) = writer.lock() {
         let _ = writeln!(file, "{}", line);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::protocol::DelegateResourceContract;
+
+    fn addr(byte: u8) -> Vec<u8> {
+        let mut addr = vec![0u8; 21];
+        addr[0] = 0x41;
+        addr[1] = byte;
+        addr
+    }
+
+    #[test]
+    fn delegate_details_include_lock_fields() {
+        let owner = addr(1);
+        let receiver = addr(2);
+
+        let details = delegate_details(&DelegateResourceContract {
+            owner_address: owner.clone(),
+            resource: 1, // ENERGY
+            balance: 15_000_000,
+            receiver_address: receiver.clone(),
+            lock: true,
+            lock_period: 7,
+        });
+
+        assert_eq!(details["owner"], bytes_to_base58(&owner));
+        assert_eq!(details["receiver"], bytes_to_base58(&receiver));
+        assert_eq!(details["resource"], "ENERGY");
+        assert_eq!(details["amount"], 15_000_000);
+        assert_eq!(details["lock"], true);
+        assert_eq!(details["lock_period"], 7);
+    }
+
+    #[test]
+    fn delegate_details_represent_unlocked_delegation() {
+        let details = delegate_details(&DelegateResourceContract {
+            owner_address: addr(3),
+            resource: 0, // BANDWIDTH
+            balance: 1_000_000,
+            receiver_address: addr(4),
+            lock: false,
+            lock_period: 0,
+        });
+
+        assert_eq!(details["resource"], "BANDWIDTH");
+        assert_eq!(details["lock"], false);
+        assert_eq!(details["lock_period"], 0);
+    }
+
+    #[test]
+    fn delegate_details_map_tron_power_resource() {
+        let details = delegate_details(&DelegateResourceContract {
+            owner_address: addr(5),
+            resource: 2, // TRON_POWER
+            balance: 5_000_000,
+            receiver_address: addr(6),
+            lock: false,
+            lock_period: 0,
+        });
+
+        assert_eq!(details["resource"], "TRON_POWER");
+    }
+
+    #[test]
+    fn new_transaction_events_carry_update_type() {
+        let event = build_event_json("abc", "TRX_TRANSFER", 1, TransactionStatus::Mempool, None);
+
+        assert_eq!(event["update_type"], "NEW_TRANSACTION");
+        assert_eq!(event["status"], "PENDING_MEMPOOL");
+    }
 }
