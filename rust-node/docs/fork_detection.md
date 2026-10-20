@@ -14,7 +14,7 @@ The node maintains a rolling history of the last 64 block headers (Number, Hash,
 
 ### Fork Detection Algorithm
 
-When a new block header arrives via P2P or gRPC:
+When a new block header arrives via P2P:
 
 1.  **Extension**: If `parent_hash` matches our current head's `hash`, and the number is `N+1`, we simply append it.
 2.  **Re-org**: If `parent_hash` does NOT match but the height is near our current tip:

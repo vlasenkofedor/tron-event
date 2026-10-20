@@ -18,7 +18,7 @@
   - [2. Hybrid Tracking Pipeline & Lifecycle States](#2-hybrid-tracking-pipeline--lifecycle-states)
   - [3. Fork Detection & Re-org Protection](#3-fork-detection--re-org-protection)
   - [4. Real-time gRPC Event Streaming](#4-real-time-grpc-event-streaming)
-  - [5. Lite Node Compatibility](#5-lite-node-compatibility)
+  - [5. Fully Self-Contained Operation](#5-fully-self-contained-operation)
 - [Project Layout](#project-layout)
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
@@ -123,8 +123,8 @@ In DPoS networks, short forks (1–2 blocks) occasionally occur when two Super R
 - Supports **dynamic address filtering**: add or remove monitored addresses on the fly without restarting or dropping the connection.
 - High-efficiency Zero-Copy event distribution with minimal latency.
 
-### 5. Lite Node Compatibility
-Does not require transaction history indexing or multi-gigabyte LevelDB archives. Operates seamlessly alongside Lite FullNodes or remote public gRPC endpoints.
+### 5. Fully Self-Contained Operation
+Does not require transaction history indexing, multi-gigabyte LevelDB archives, or an upstream FullNode RPC. Every lifecycle state — `PENDING_MEMPOOL`, `MINED` and `SOLID` — is derived from blocks received over P2P and from the node's own chain depth, so there is no third-party endpoint to trust, pay for, or keep available.
 
 ---
 
@@ -210,7 +210,6 @@ cp rust-node/.env.example rust-node/.env
 | `NODE_ID` | Auto-generated 64-byte hex | Unique cryptographic identity for this P2P node |
 | `EXTERNAL_IP` | `127.0.0.1` | Your public/external IP announced to peers |
 | `GRPC_LISTEN_ADDR` | `0.0.0.0:50051` | Bind address for the internal gRPC subscription API |
-| `NODE_GRPC_URL` | `tron.coinductor.io:50051` | Upstream FullNode gRPC endpoint for Solidity confirmation |
 | `SEED_NODES` | Built-in seed list | Optional comma-separated custom peer IP:port list |
 
 ---

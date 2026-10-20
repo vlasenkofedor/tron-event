@@ -8,7 +8,6 @@ pub struct Config {
     pub seed_nodes: Vec<String>,
     pub node_id: Vec<u8>,
     pub external_ip: String,
-    pub node_grpc_url: String,
     pub grpc_listen_addr: String,
 }
 
@@ -26,7 +25,7 @@ impl Config {
     /// Load configuration from environment variables (.env file or process env).
     ///
     /// Falls back to sensible defaults for all fields.
-    /// Critical settings: NETWORK, NODE_GRPC_URL, GRPC_LISTEN_ADDR, SEED_NODES.
+    /// Critical settings: NETWORK, GRPC_LISTEN_ADDR, SEED_NODES.
     pub fn load() -> Self {
         dotenv().ok();
 
@@ -61,7 +60,6 @@ impl Config {
         };
 
         let external_ip = env::var("EXTERNAL_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let node_grpc_url = env::var("NODE_GRPC_URL").unwrap_or_else(|_| "tron.coinductor.io:50051".to_string());
         let grpc_listen_addr = env::var("GRPC_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".to_string());
 
         Config {
@@ -70,7 +68,6 @@ impl Config {
             seed_nodes,
             node_id,
             external_ip,
-            node_grpc_url,
             grpc_listen_addr,
         }
     }

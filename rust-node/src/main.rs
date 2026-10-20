@@ -40,11 +40,10 @@ async fn main() {
         }
     });
 
-    // 5. Start Transaction Status Worker (Confirmation / Solidity)
+    // 5. Start Transaction Status Worker (confirmation / finality)
     let state_status = node_state.clone();
-    let grpc_url = cfg.node_grpc_url.clone();
     tokio::spawn(async move {
-        p2p::status_worker::start_status_worker(state_status, grpc_url).await;
+        p2p::status_worker::start_status_worker(state_status).await;
     });
 
     // 6. Start P2P Inbound Listener (passive — let peers connect to us)
