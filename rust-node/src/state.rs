@@ -454,8 +454,8 @@ impl NodeState {
         }
 
         // Locators are ordered oldest-first, with the genesis block at the
-        // end of the list. A peer walks the list to find the newest block it
-        // knows and streams the blocks that follow.
+        // end of the list. This ordering is what peers accept in practice;
+        // a newest-first list makes them fall back to an old block.
         locators.sort_by_key(|(n, _)| *n);
         locators.dedup();
         tracing::debug!("[SYNC] Locators: {:?}", locators);
@@ -582,6 +582,34 @@ impl NodeState {
         let Some(idx) = ancestor_index else {
             // No common ancestor in our (limited) history: the branch is too
             // far diverged to reconcile locally. Signal a re-sync instead.
+            //
+            // One case must not be treated as a divergence: right after a
+            // restart the chain holds a single block adopted from a peer's
+            // Hello message. That block is only an anchor and its hash may
+            // come from a different peer (or fork), so no peer can match it
+            // as a locator. A peer sending a block at the same height with a
+            // different hash proves the anchor is unusable; adopt the real
+            // block, otherwise every sync request would return that same
+            // block as a duplicate and the node would never advance.
+            let anchor = chain.back().filter(|b| num == b.number && b.parent_hash.is_empty()).cloned();
+            if let Some(anchor) = anchor {
+                info!(
+                    "[CHAIN] Replacing unverified anchor #{} ({}) with peer block {}",
+                    anchor.number, anchor.hash, hash_hex
+                );
+                chain.clear();
+                chain.push_back(BlockInfo {
+                    number: num,
+                    hash: hash_hex.to_string(),
+                    parent_hash: parent_hex.to_string(),
+                });
+                let content = Self::serialize_chain(chain);
+                let _ = std::fs::write(STATE_FILE, &content);
+                self.rollback_txs_of_block(anchor.number);
+                self.chain_trusted.store(true, Ordering::SeqCst);
+                return BlockUpdateResult::Success;
+            }
+
             info!("[CHAIN] Fork at #{} has no common ancestor in local history", num);
             return BlockUpdateResult::Duplicate;
         };
