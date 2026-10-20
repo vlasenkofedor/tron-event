@@ -23,6 +23,10 @@
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [Building & Running](#building--running)
+- [Capacity & Resource Usage](#capacity--resource-usage)
+  - [Measured footprint by subscription count](#measured-footprint-by-subscription-count)
+  - [Recommended sizing](#recommended-sizing)
+  - [Event throughput](#event-throughput)
 - [gRPC Subscription API](#grpc-subscription-api)
   - [Protobuf Service](#protobuf-service)
   - [Event Schema](#event-schema)
@@ -132,6 +136,12 @@ tron-event/
 ├── .gitignore                    # Comprehensive exclusion rules (no secrets/debugs)
 ├── main_net_config.conf          # Reference Tron Mainnet configuration
 ├── test_net_config.conf          # Reference Tron Testnet configuration
+├── examples/                     # Standalone client examples & load-test tool
+│   ├── README.md                 # Examples guide and benchmark instructions
+│   ├── rust/                     # Rust subscriber example + load_test binary
+│   └── js/                       # Node.js gRPC streaming client
+├── scripts/
+│   └── probe_seeds.py            # Seed-node reachability / handshake prober
 └── rust-node/                    # Core Rust implementation
     ├── Cargo.toml                # Rust dependencies & build settings
     ├── build.rs                  # Protobuf compilation (tonic-build + prost-build)
@@ -145,11 +155,6 @@ tron-event/
     │   ├── p2p_architecture.md   # Zero-copy gossip protocol architecture
     │   ├── p2p_handshake_protocol.md # OpCode table and framing specification
     │   └── fork_detection.md     # Re-org handling and Solidity confirmation
-    ├── examples/                 # Integration test examples
-    │   ├── test_grpc_info.rs     # Rust RPC connection test
-    │   └── js/                   # Node.js gRPC client example
-    │       ├── index.js          # Live streaming client demo
-    │       └── package.json
     └── src/
         ├── main.rs               # Node entrypoint and orchestration
         ├── lib.rs                # Library exports
@@ -231,6 +236,48 @@ The node will initialize:
 
 ---
 
+## Capacity & Resource Usage
+
+The node keeps a set of subscribed addresses in memory and performs an O(1) hash lookup for every address mentioned by an incoming transaction. Memory therefore grows linearly with the number of tracked addresses, while CPU growth is driven by transaction volume rather than subscription count.
+
+All figures below were measured with the bundled [`load_test`](examples/rust/src/bin/load_test.rs) benchmark against a live node connected to Tron Mainnet (5 peers, chain head advancing) on:
+
+- **CPU**: AMD Ryzen 9 9950X (16 cores / 32 threads)
+- **RAM**: 125 GiB
+- **OS**: Linux 7.0
+- **Build**: `cargo build --release` (default profile)
+
+### Measured footprint by subscription count
+
+| Subscribed addresses | Node RSS | Node CPU (steady state) | Registration throughput |
+| ---: | ---: | ---: | ---: |
+| 10,000 | 58 MB | 0.3 % | 17.4 M addr/s |
+| 100,000 | 78 MB | 0.4 % | 23.9 M addr/s |
+| 500,000 | 190 MB | 0.6 % | 28.7 M addr/s |
+| 2,000,000 | 588 MB | 1.5 % | 1.4 M addr/s |
+
+The marginal cost is roughly **270–300 bytes of RAM per tracked address**, on top of a ~40 MB baseline for the node itself. Address registration is batched (500 addresses per gRPC message), takes well under a second for 500k addresses, and does not block event delivery.
+
+### Recommended sizing
+
+| Deployment | Addresses | Suggested resources |
+| :--- | ---: | :--- |
+| Small / single-purpose service | up to 50,000 | 1 vCPU, 256 MB RAM |
+| Typical payment or custody service | up to 500,000 | 1–2 vCPU, 512 MB RAM |
+| Large exchange / indexer | up to 2,000,000 | 2 vCPU, 1 GB RAM |
+
+**Comfortable limit:** around **500,000 addresses** on a 512 MB machine. Two million addresses still work but leave little headroom for burst traffic, fork buffers, and the OS page cache, so 1 GB is advisable at that scale. Beyond a few million addresses, shard subscriptions across several node instances — each instance maintains its own P2P connections.
+
+### Event throughput
+
+Because the node filters locally, subscription count has no measurable effect on event-handling cost; the bottleneck is the number of matching transactions on chain. Delivery itself is a streaming gRPC call with no polling, so latency stays in the low milliseconds from mempool gossip to client callback.
+
+A 90-second run with **300 of the most active Mainnet addresses** subscribed delivered **3,598 events (≈40 events/s)**, about 1.1 MB of JSON, while the node process used **69 MB RSS and 2.3 % of one core**. Each transfer typically produces three events as it moves through its lifecycle (`PENDING_MEMPOOL` → `MINED` → `SOLID`), so this corresponds to roughly 1,200 distinct transactions in the window.
+
+To reproduce these numbers, see the load-testing section of [`examples/README.md`](examples/README.md#load-testing).
+
+---
+
 ## gRPC Subscription API
 
 ### Protobuf Service
@@ -300,28 +347,23 @@ When the transaction reaches finality on the main branch, a `STATUS_CHANGE` upda
 
 ## Client Integration Examples
 
+Ready-to-run clients live in the top-level [`examples/`](examples/) directory. Each one connects to `127.0.0.1:50051`, registers one or more Base58 addresses, and prints every matching event as JSON.
+
 ### Rust Client
 
-Run the built-in test client monitoring a specific Tron address:
-
 ```bash
-cargo run --bin test_client -- TQrY8tryqsYVCYS3MFbtffiPp2ccyn4STm
+cd examples/rust
+cargo run --release -- TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
 ```
 
-Or monitor all live USDT transfers:
-
-```bash
-cargo run --bin test_usdt
-```
+The same crate also builds `load_test`, the benchmark used for the capacity figures below.
 
 ### Node.js Client
 
-A full-featured Node.js streaming client is available under `rust-node/examples/js`:
-
 ```bash
-cd rust-node/examples/js
+cd examples/js
 npm install
-node index.js
+node index.js TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
 ```
 
 ```javascript
@@ -329,7 +371,7 @@ const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const path = require('path');
 
-const PROTO_PATH = path.join(__dirname, '../../proto/node_api.proto');
+const PROTO_PATH = path.join(__dirname, '../../rust-node/proto/node_api.proto');
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, { keepCase: true });
 const apiProto = grpc.loadPackageDefinition(packageDefinition).api;
 
@@ -347,6 +389,8 @@ stream.on('data', (response) => {
   console.log(`[${event.status}] ${event.type}: ${event.txid}`);
 });
 ```
+
+See [`examples/README.md`](examples/README.md) for output formats, environment variables, and benchmark instructions.
 
 ---
 

@@ -71,3 +71,5 @@ hash.txt
 fresh_nodes.txt
 seed_nodes.txt
 scratch/
+__pycache__/
+*.pyc

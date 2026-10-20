@@ -76,7 +76,7 @@ async fn run_inbound_connection(
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let writer_tx = spawn_writer_task(writer, peer_addr.clone()).await;
-    let mut peer_state = PeerState { compression_enabled: false, sync_sent: false, tron_hello_recvd: false, req_blocks: lru::LruCache::new(std::num::NonZeroUsize::new(20000).unwrap()), pending_inventory: std::collections::VecDeque::new(), pending_blocks: 0, last_block_recv_time: 0 };
+    let mut peer_state = PeerState::new();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
     let mut reader = reader;
 
@@ -93,14 +93,21 @@ async fn run_inbound_connection(
                     writer_tx.send((P2pMessage::Libp2pHello(libp2p_hello), false)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
 
                     let (cur_num, cur_hash_hex) = state.last_block();
+                    // The hash must be a full 32-byte block id. Advertising an
+                    // empty hash makes the peer reject the handshake with
+                    // INCOMPATIBLE_PROTOCOL.
                     let cur_hash = hex::decode(&cur_hash_hex).unwrap_or_default();
+                    // `cfg.node_id` already holds the raw bytes; decoding it
+                    // again as hex yields an empty node id, which makes peers
+                    // reject the handshake.
                     let tron_hello = protocol::protocol::HelloMessage {
-                        from: Some(protocol::protocol::Endpoint { address: ip_to_bytes(&cfg.external_ip), port: 18888, node_id: hex::decode(&cfg.node_id).unwrap_or_default(), ..Default::default() }),
+                        from: Some(protocol::protocol::Endpoint { address: ip_to_bytes(&cfg.external_ip), port: 18888, node_id: cfg.node_id.clone(), ..Default::default() }),
                         version: cfg.p2p_version as i32, timestamp: now,
                         genesis_block_id: Some(protocol::protocol::hello_message::BlockId { hash: hex::decode(crate::state::GENESIS_HASH).unwrap_or_default(), number: 0 }),
                         solid_block_id: Some(protocol::protocol::hello_message::BlockId { hash: cur_hash.clone(), number: cur_num as i64 }),
                         head_block_id: Some(protocol::protocol::hello_message::BlockId { hash: cur_hash, number: cur_num as i64 }),
-                        address: vec![], code_version: b"4.8.1".to_vec(), node_type: 1, ..Default::default()
+                        address: vec![], code_version: b"4.8.1".to_vec(), node_type: 1,
+                        lowest_block_num: cur_num as i64, ..Default::default()
                     };
                     writer_tx.send((P2pMessage::TronHello(tron_hello), false)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
                 }
@@ -121,9 +128,30 @@ pub async fn connect_to_node(cfg: &Config, addr: &str, state: Arc<NodeState>) ->
     let state_clone = state.clone();
     let addr_str = addr.to_string();
     let res = tokio::spawn(async move {
-        let stream = match TcpStream::connect(&addr_str).await {
-            Ok(s) => s,
-            Err(e) => { return Err(crate::error::NodeError::Network(format!("Connection failed to {}: {}", addr_str, e))); }
+        // A connect timeout is essential: a peer that accepts the TCP
+        // handshake but never completes the protocol handshake would
+        // otherwise hold the connection slot forever. With a limited number
+        // of slots, a few unresponsive seeds would block all outgoing
+        // connections and the node would stop syncing entirely.
+        let stream = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpStream::connect(&addr_str),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                return Err(crate::error::NodeError::Network(format!(
+                    "Connection failed to {}: {}",
+                    addr_str, e
+                )));
+            }
+            Err(_) => {
+                return Err(crate::error::NodeError::Network(format!(
+                    "Connection timeout to {}",
+                    addr_str
+                )));
+            }
         };
         info!("[{}] Connected, starting handshake", addr_str);
         let mut tx_rx = state_clone.tx_broadcast.subscribe();
@@ -142,7 +170,7 @@ async fn run_connection(
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let writer_tx = spawn_writer_task(writer, peer_addr.clone()).await;
-    let mut peer_state = PeerState { compression_enabled: false, sync_sent: false, tron_hello_recvd: false, req_blocks: lru::LruCache::new(std::num::NonZeroUsize::new(20000).unwrap()), pending_inventory: std::collections::VecDeque::new(), pending_blocks: 0, last_block_recv_time: 0 };
+    let mut peer_state = PeerState::new();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
     let libp2p_hello = protocol::p2p::HelloMessage {
         from: Some(protocol::protocol::Endpoint { address: ip_to_bytes(&cfg.external_ip), port: 18888, node_id: cfg.node_id.clone(), address_ipv6: vec![] }),
@@ -157,14 +185,21 @@ async fn run_connection(
                 P2pMessage::Libp2pHello(h) => {
                     info!("[{}] Handshake: Received LibP2P Hello (v={}, net={})", peer_addr, h.version, h.network_id);
                     let (cur_num, cur_hash_hex) = state.last_block();
+                    // The hash must be a full 32-byte block id. Advertising an
+                    // empty hash makes the peer reject the handshake with
+                    // INCOMPATIBLE_PROTOCOL.
                     let cur_hash = hex::decode(&cur_hash_hex).unwrap_or_default();
+                    // `cfg.node_id` already holds the raw bytes; decoding it
+                    // again as hex yields an empty node id, which makes peers
+                    // reject the handshake.
                     let tron_hello = protocol::protocol::HelloMessage {
-                        from: Some(protocol::protocol::Endpoint { address: ip_to_bytes(&cfg.external_ip), port: 18888, node_id: hex::decode(&cfg.node_id).unwrap_or_default(), ..Default::default() }),
+                        from: Some(protocol::protocol::Endpoint { address: ip_to_bytes(&cfg.external_ip), port: 18888, node_id: cfg.node_id.clone(), ..Default::default() }),
                         version: cfg.p2p_version as i32, timestamp: now,
                         genesis_block_id: Some(protocol::protocol::hello_message::BlockId { hash: hex::decode(crate::state::GENESIS_HASH).unwrap_or_default(), number: 0 }),
                         solid_block_id: Some(protocol::protocol::hello_message::BlockId { hash: cur_hash.clone(), number: cur_num as i64 }),
                         head_block_id: Some(protocol::protocol::hello_message::BlockId { hash: cur_hash, number: cur_num as i64 }),
-                        address: vec![], code_version: b"4.8.1".to_vec(), node_type: 1, ..Default::default()
+                        address: vec![], code_version: b"4.8.1".to_vec(), node_type: 1,
+                        lowest_block_num: cur_num as i64, ..Default::default()
                     };
                     writer_tx.send((P2pMessage::TronHello(tron_hello), false)).map_err(|_| crate::error::NodeError::Network("writer channel closed".to_string()))?;
                 }
@@ -192,26 +227,62 @@ async fn run_p2p_loop(
     let res = loop {
         tokio::select! {
             _ = watchdog_interval.tick() => {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+
+                // Recycle a peer that stopped streaming blocks.
+                //
+                // A peer answers a sync request with a window of blocks and
+                // then keeps streaming them. The node asks for the next
+                // window itself, so a quiet peer is only recycled when the
+                // chain stopped advancing altogether.
+                //
+                // The threshold is deliberately generous: dropping a
+                // connection too eagerly makes java-tron peers blacklist the
+                // node, which costs far more than waiting.
+                if peer_state.last_block_recv_time > 0
+                    && now.saturating_sub(peer_state.last_block_recv_time) > 45_000
+                {
+                    warn!(
+                        "[{}] No blocks received for 45s. Recycling connection.",
+                        peer_addr
+                    );
+                    break Err(crate::error::NodeError::Network("Block stream idle, recycling peer".to_string()));
+                }
+
                 let gaps = state.pending_gaps.lock().len();
                 if gaps > 0 {
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
                     let last_move = state.last_seq_head_move_time.load(Ordering::SeqCst);
-                    if now.saturating_sub(last_move) > 45000 { // 45s threshold
+                    if now.saturating_sub(last_move) > 45_000 { // 45s threshold
                         warn!("[{}] RECYCLE: SeqHead stalled for 45s with {} gaps. Dropping peer to recycle connection.", peer_addr, gaps);
                         break Err(crate::error::NodeError::Network("Sync stall recycler".to_string()));
                     }
                 }
             }
             Ok(sync_req) = sync_cmd_rx.recv() => {
-                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                 if peer_state.pending_blocks > 0 && now.saturating_sub(peer_state.last_block_recv_time) > 5000 {
-                     warn!("[{}] Inventory fetch stalled. Resetting pending_blocks to allow new SyncBlockChain.", peer_addr);
+                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                 // Detect a stalled fetch using the time of the last request
+                 // we sent, not the last block we received: a peer may keep
+                 // sending other blocks while never delivering the one we
+                 // asked for, which would keep the stall invisible.
+                 if peer_state.pending_blocks > 0 && now.saturating_sub(peer_state.last_fetch_time) > 10_000 {
+                     warn!("[{}] Inventory fetch stalled for 10s. Resetting pending state to allow a new SyncBlockChain.", peer_addr);
                      peer_state.pending_blocks = 0;
                      peer_state.pending_inventory.clear();
+                     // Forget which hashes were already requested: the peer
+                     // never delivered them, so they must be requestable again.
+                     // Without this the fetch loop deadlocks permanently.
+                     peer_state.req_blocks.clear();
                  }
-                 if peer_state.pending_inventory.is_empty() && peer_state.pending_blocks == 0 {
-                     let _ = writer_tx.send((P2pMessage::TronSyncBlockChain(sync_req), peer_state.compression_enabled));
-                 }
+                 // A peer accepts only ONE SyncBlockChain per connection and
+                 // drops the connection when it receives a second one. The
+                 // sync request is therefore sent exactly once, during the
+                 // handshake (see `handle_tron_hello`).
+                 //
+                 // If the peer stopped streaming blocks, the connection is
+                 // recycled by the watchdog above and a new connection is
+                 // established, which performs a fresh handshake and a fresh
+                 // sync request.
+                 let _ = sync_req;
             }
             Ok(tx) = tx_rx.recv() => {
                 let _ = writer_tx.send((P2pMessage::TronTrx(tx), peer_state.compression_enabled));
@@ -226,7 +297,6 @@ async fn run_p2p_loop(
                         handlers::handle_message(other, &peer_addr, &writer_tx, &state, peer_state).await?;
                         if ping_task.is_none() {
                             let w_tx = writer_tx.clone();
-                            let p_addr = peer_addr.clone();
                             ping_task = Some(tokio::spawn(async move {
                                 loop {
                                     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;

@@ -106,6 +106,9 @@ impl TronCodec {
                 "[{}] IN: type_id=0x{:02x}, payload_len={}, format=libp2p_raw",
                 peer_addr, type_id, payload.len()
             );
+            if type_id == crate::net::message::MSG_LIBP2P_HELLO {
+                tracing::info!("[{}] IN: libp2p hello raw = {}", peer_addr, hex::encode(payload));
+            }
             return Ok(P2pMessage::decode(type_id, payload));
         }
 
@@ -136,6 +139,12 @@ impl TronCodec {
             "[{}] IN: type_id=0x{:02x}, payload_len={}, compress={}",
             peer_addr, type_id, payload.len(), compress_type
         );
+        if type_id == crate::net::message::MSG_TRON_HELLO {
+            tracing::info!("[{}] IN: tron hello raw = {}", peer_addr, hex::encode(payload));
+        }
+        if type_id == crate::net::message::MSG_INVENTORY {
+            tracing::info!("[{}] IN: inventory raw = {}", peer_addr, hex::encode(payload));
+        }
 
         Ok(P2pMessage::decode(type_id, payload))
     }
@@ -185,6 +194,18 @@ impl TronCodec {
         msg.encode(&mut proto_buf).map_err(|e| {
             crate::error::NodeError::Unknown(format!("Protobuf encode error: {}", e))
         })?;
+
+        // Log outgoing frames so the protocol exchange can be verified.
+        tracing::info!(
+            "[{}] OUT: type_id=0x{:02x}, compressed={}",
+            _peer_addr, type_id, compressed
+        );
+        if type_id == crate::net::message::MSG_LIBP2P_HELLO {
+            tracing::info!("[{}] OUT: libp2p hello raw = {}", _peer_addr, hex::encode(&proto_buf));
+        }
+        if type_id == crate::net::message::MSG_TRON_HELLO {
+            tracing::info!("[{}] OUT: tron hello raw = {}", _peer_addr, hex::encode(&proto_buf));
+        }
 
         // Build frame
         let frame: Vec<u8> = if type_id >= 0xfb {
@@ -257,6 +278,7 @@ impl TronCodec {
         Ok(value)
     }
 
+    #[cfg(test)]
     fn parse_varint(data: &[u8], mut pos: usize) -> (u64, usize) {
         let mut value: u64 = 0;
         let mut shift = 0u32;

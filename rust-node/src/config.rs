@@ -12,8 +12,15 @@ pub struct Config {
     pub grpc_listen_addr: String,
 }
 
-pub const DEFAULT_BLOCK_NUM: u64 = 81_728_607;
-pub const DEFAULT_BLOCK_HASH: &str = "0000000004df145fc80be5639ed7a12fd282bf1591be3998806a9290708c893d";
+/// Fallback chain height used only before the first peer contact.
+///
+/// The node overrides this position as soon as it receives a `TronHello` from
+/// a peer (see `NodeState::reanchor_to_head`). Peers only serve blocks from
+/// their own recent chain, so a position that is far behind can never be
+/// closed by normal block fetching.
+pub const DEFAULT_BLOCK_NUM: u64 = 87_248_000;
+/// Hash placeholder for the fallback position; replaced on first peer contact.
+pub const DEFAULT_BLOCK_HASH: &str = "00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653dc";
 
 impl Config {
     /// Load configuration from environment variables (.env file or process env).
