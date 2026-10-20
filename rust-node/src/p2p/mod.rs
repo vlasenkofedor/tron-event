@@ -229,6 +229,25 @@ async fn run_p2p_loop(
             _ = watchdog_interval.tick() => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
 
+                // Detect a stalled fetch using the time of the last request
+                // we sent, not the last block we received: a peer may keep
+                // sending other blocks while never delivering the one we
+                // asked for, which would keep the stall invisible.
+                if peer_state.pending_blocks > 0
+                    && now.saturating_sub(peer_state.last_fetch_time) > 10_000
+                {
+                    warn!(
+                        "[{}] Inventory fetch stalled for 10s. Resetting pending state to allow a new SyncBlockChain.",
+                        peer_addr
+                    );
+                    peer_state.pending_blocks = 0;
+                    peer_state.pending_inventory.clear();
+                    // Forget which hashes were already requested: the peer
+                    // never delivered them, so they must be requestable again.
+                    // Without this the fetch loop deadlocks permanently.
+                    peer_state.req_blocks.clear();
+                }
+
                 // Recycle a peer that stopped streaming blocks.
                 //
                 // A peer answers a sync request with a window of blocks and
@@ -259,30 +278,23 @@ async fn run_p2p_loop(
                 }
             }
             Ok(sync_req) = sync_cmd_rx.recv() => {
-                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                 // Detect a stalled fetch using the time of the last request
-                 // we sent, not the last block we received: a peer may keep
-                 // sending other blocks while never delivering the one we
-                 // asked for, which would keep the stall invisible.
-                 if peer_state.pending_blocks > 0 && now.saturating_sub(peer_state.last_fetch_time) > 10_000 {
-                     warn!("[{}] Inventory fetch stalled for 10s. Resetting pending state to allow a new SyncBlockChain.", peer_addr);
-                     peer_state.pending_blocks = 0;
-                     peer_state.pending_inventory.clear();
-                     // Forget which hashes were already requested: the peer
-                     // never delivered them, so they must be requestable again.
-                     // Without this the fetch loop deadlocks permanently.
-                     peer_state.req_blocks.clear();
-                 }
-                 // A peer accepts only ONE SyncBlockChain per connection and
-                 // drops the connection when it receives a second one. The
-                 // sync request is therefore sent exactly once, during the
-                 // handshake (see `handle_tron_hello`).
-                 //
-                 // If the peer stopped streaming blocks, the connection is
-                 // recycled by the watchdog above and a new connection is
-                 // established, which performs a fresh handshake and a fresh
-                 // sync request.
-                 let _ = sync_req;
+                // Forward the periodic sync request to this peer.
+                //
+                // `status_worker` broadcasts a sync request every few
+                // seconds once the chain stops advancing. Repeated requests
+                // on one connection are accepted, but a burst makes the peer
+                // drop the connection, so each peer is asked at most once
+                // per 3 seconds and only while it has no fetch in flight.
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                if peer_state.pending_blocks == 0
+                    && now.saturating_sub(peer_state.last_sync_request_time) >= 3000
+                {
+                    peer_state.last_sync_request_time = now;
+                    let _ = writer_tx.send((
+                        P2pMessage::TronSyncBlockChain(sync_req),
+                        peer_state.compression_enabled,
+                    ));
+                }
             }
             Ok(tx) = tx_rx.recv() => {
                 let _ = writer_tx.send((P2pMessage::TronTrx(tx), peer_state.compression_enabled));

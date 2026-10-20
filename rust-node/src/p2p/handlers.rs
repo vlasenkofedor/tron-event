@@ -53,7 +53,14 @@ impl PeerState {
             req_blocks: LruCache::new(std::num::NonZeroUsize::new(20000).unwrap()),
             pending_inventory: VecDeque::new(),
             pending_blocks: 0,
-            last_block_recv_time: 0,
+            // Start the idle timer now. A peer that completes the handshake
+            // but never delivers a block must be recycled like any other idle
+            // peer; leaving this at 0 disabled the watchdog for such peers
+            // and they held a connection slot forever.
+            last_block_recv_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             last_fetch_time: 0,
             last_sync_request_time: 0,
             req_txs: LruCache::new(std::num::NonZeroUsize::new(20000).unwrap()),        }
@@ -400,8 +407,6 @@ pub async fn handle_block(
     peer_state: &mut PeerState,
     peer_addr: &str,
 ) -> crate::error::Result<()> {
-    peer_state.last_block_recv_time = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    
     let block_num = block.block_header.as_ref().and_then(|h| h.raw_data.as_ref()).map(|r| r.number).unwrap_or(0);
     debug!("[{}] IN: Block #{}", peer_addr, block_num);
 
@@ -421,7 +426,17 @@ pub async fn handle_block(
             state.last_block()
         );
         let update_result = state.update_block(header.number as u64, &block_id, &header.parent_hash);
-        
+
+        // Only count blocks that tell us something new. A peer that keeps
+        // replaying blocks we already have would otherwise look "active"
+        // forever and never be recycled, while the chain makes no progress.
+        if !matches!(update_result, BlockUpdateResult::Duplicate) {
+            peer_state.last_block_recv_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+        }
+
         match update_result {
             BlockUpdateResult::GapDetected { missing_count: _, last_good_hash: _ } => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
